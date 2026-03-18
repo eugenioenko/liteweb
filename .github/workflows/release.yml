@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install frontend deps
+        run: pnpm install
+        working-directory: ui
+
+      - name: Build frontend
+        run: pnpm run build
+        working-directory: ui
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui/dist/
+
+  build-binaries:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: build-frontend
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: pkg/ui/dist/
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o liteweb${{ matrix.ext }} .
+
+      - name: Package (unix)
+        if: matrix.goos != 'windows'
+        run: |
+          tar czf liteweb-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz \
+            liteweb README.md
+
+      - name: Package (windows)
+        if: matrix.goos == 'windows'
+        run: |
+          zip liteweb-windows-${{ matrix.goarch }}.zip liteweb.exe README.md
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: liteweb-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: liteweb-*.${{ matrix.goos == 'windows' && 'zip' || 'tar.gz' }}
+
+  release:
+    name: Create release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: liteweb-*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            liteweb-linux-amd64.tar.gz
+            liteweb-linux-arm64.tar.gz
+            liteweb-darwin-amd64.tar.gz
+            liteweb-darwin-arm64.tar.gz
+            liteweb-windows-amd64.zip
